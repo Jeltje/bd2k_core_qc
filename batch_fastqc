@@ -1,0 +1,196 @@
+#! /usr/bin/env perl
+
+use strict;
+use warnings;
+use File::NCopy;
+use Getopt::Long;
+
+my $samples_file = "";
+my $output_dir = ".";
+my ($verbose, $help  ) ;
+my $result = GetOptions ("samples=s" => \$samples_file, #string
+	                   "verbose" => \$verbose, #bool
+                             "out=s" => \$output_dir, #string
+                              "help" => \$help);
+usage() if $help;
+usage() unless $samples_file;
+
+sub usage
+{
+   print "usage: $0 [-v] [-h] --samples SAMPLES_FILE\n";
+	print "\n";
+	print "This program takes in a list of fastqc output and generates two html files:\n";
+	print "    fastqc_summary.htm    contains a table with the PASS/FAIL/WARN icons for all plots in each sample,\n";
+	print "    fastqc_plots.htm      contains thumbnails of all plots, as well as links to the full sized plots and\n";
+	print "                              FASTQC reports for each sample\n";
+	print "\n";
+	print "--samples  SAMPLES_FILE (REQUIRED)- tab separated file containing the sample ID and \n";
+	print "                 the location of its FASTQC output\n";  
+	print "                 Example:\n";
+	print "                 sample_1234\tfastqcdata/sample1234/fastqc\n";
+	print "\n";
+	print "--out      OUTPUT_DIR - specify the directory to output the qc data and reports. Defaults\n";
+	print "			to the current directory.\n";
+	print "\n";
+	print "-h         Print this message\n";
+	print "\n";
+   exit;
+}
+
+
+my @samplenames = ();
+my %fastqdirs = ();
+
+print "Output Dir: $output_dir\n" if $verbose;
+print "Creating output directory if needed\n" if $verbose;
+$output_dir = $output_dir;
+system ("mkdir -p $output_dir/fastqc");
+
+# read sample names and copy directory contents to outputdir
+# keep track of the relative location (for printing to HTML)
+# create thumbnails for all image files
+if( $samples_file )
+{
+
+	print "Getting sample names from: $samples_file\n" if $verbose;
+	unless(-e $samples_file)
+	{
+		print "ERROR: samples file is not valid and cannot be found.\n";
+		print "name file provided: $samples_file.\n";
+		exit;
+	} 
+	open(NAMEFILE, $samples_file);
+	while(<NAMEFILE>) 
+	{
+		chomp;
+		my ($sample_name, $fqdir) = split("\t");
+                my $fdir = 'fastqc/'.$sample_name;
+                system("mkdir -p $output_dir/$fdir");
+                my $cp = File::NCopy->new(recursive => 1);
+                $cp->copy("$fqdir/*", "$output_dir/$fdir") 
+                     or die "Could not perform rcopy of $fqdir to $output_dir/$fdir: $!";  
+                # create thumbnails
+	        system("rm -f $output_dir/$fdir/Images/thumb.*");
+                my @png = glob( "$output_dir/$fdir/Images" . '/*.png' );
+                foreach my$file(@png){
+			(my$thumb = $file) =~ s/Images\//Images\/thumb./;
+			if(system("convert -contrast -thumbnail 110 $file $thumb") != 0){
+				die "could not run convert - did you install imagemagick?"
+			}
+		}
+                push (@samplenames, $sample_name);
+                $fastqdirs{$sample_name} = $fdir;
+	}
+	close(NAMEFILE);
+}
+
+print "Generating fastqc_summary.htm\n" if $verbose;
+
+# First HTML contains the PASS/FAIL/WARN icons
+open(HTML,">$output_dir/fastqc_summary.htm");
+
+#list col names
+my @names = ("basic","base qual","seq qual","seq cont","base GC","seq GC","base N","len dist","seq dup","over rep","kmers");
+foreach my $name (@names)
+{
+	$name = "<td><font size=1>$name</font></td>";
+}
+my $names = join("",@names);
+
+#start printing table
+print HTML "<table cellpadding=1><tr><td></td><td><font size=2>&nbsp;&nbsp;&nbsp;sample</font></td>$names</tr>\n";
+
+foreach my $sample (@samplenames) #collecting the pass/warn/fail info for each lane.
+{
+	my$fqdir = $fastqdirs{$sample};  # this is the relative path
+
+	print "Filename is: $fqdir\n" if $verbose;
+
+	open(IN,"$output_dir/$fqdir/summary.txt");
+	my @pf = ();
+	my $i=0;
+	while(<IN>)
+	{
+		my ($passfail,$name,@junk) = split('\t',$_);
+		if($passfail =~ /PASS/)
+		{
+			$passfail = "<td><a href=\"$fqdir/fastqc_report.html#M$i\"><img border=0 src=\"$fqdir/Icons/tick.png\"></a></td>";
+		}
+		if($passfail =~ /WARN/)
+		{
+			$passfail = "<td><a href=\"$fqdir/fastqc_report.html#M$i\"><img border=0 src=\"$fqdir/Icons/warning.png\"></a></td>";
+		}
+		if($passfail =~ /FAIL/)
+		{
+			$passfail = "<td><a href=\"$fqdir/fastqc_report.html#M$i\"><img border=0 src=\"$fqdir/Icons/error.png\"></a></td>";
+		}
+		push(@pf,$passfail);
+		$i++;
+	}
+	my $pfs = join("\t",@pf);
+
+	print "sample name: " . $sample . "\n" if $verbose;
+	#print the row 
+	print HTML "<tr><td><font size=2><a href=\"$fqdir/fastqc_report.html\">FASTQC report</a></font></td><td nowrap>&nbsp;&nbsp;<font size=2>$sample</font>&nbsp;&nbsp;</td></td>$pfs</tr>\n";
+	print "\n" if $verbose;
+}
+print HTML "</table>";
+print HTML "<br>";
+print HTML "<font size=2><a href=\"http://wiki/research/FastQC/SIMRreports\">How to interpret FastQC results</a></font>"; 
+
+
+#another html page with actual plots (thumbnails).
+
+#these names are slightly different, because two of the items are text based tables, not plots. Kind of messy.
+
+@names = ("base qual","seq qual","seq cont","base GC","seq GC","base N","len dist","seq dup","kmers");
+my @ms = (1,2,3,4,5,6,7,8,10); #skip 0 and 9, because they are text based tables
+foreach my $name (@names)
+{
+	$name = "<td><font size=2>$name</font></td>";
+}
+$names = join("",@names);
+
+my @img_files = ("per_base_quality.png","per_sequence_quality.png","per_base_sequence_content.png","per_base_gc_content.png","per_sequence_gc_content.png","per_base_n_content.png","sequence_length_distribution.png","duplication_levels.png","kmer_profiles.png");
+
+print "Generating fastqc_plots.htm\n" if $verbose;
+
+open(HTML2,">$output_dir/fastqc_plots.htm");
+print HTML2 "<table cellpadding=1><tr><td></td><td><font size=2>&nbsp;&nbsp;&nbsp;sample&nbsp;&nbsp;&nbsp;</font></td>$names</tr>\n";
+
+foreach my $sample (@samplenames) 
+{
+	my$fqdir = $fastqdirs{$sample};
+
+	print "Filename is: $fqdir\n" if $verbose;
+
+	my @imgs = ();
+	my $i = 0;
+	foreach my $img_file (@img_files)
+	{
+		my $image = " "; 
+		my $thumb = "$fqdir/Images/thumb.".$img_file;
+		if(-e "$output_dir/$thumb")
+		{
+			$image = "<td><a href=\"$fqdir/fastqc_report.html#M$ms[$i]\"><img border=0 src=\"$thumb\"></a></td>";
+		}
+		else
+		{
+			print "Image doesn't exist: $output_dir/$thumb\n" if $verbose;
+			$image = "<td align=\"center\"><font size=1>N/A</font></td>";
+		}
+		push(@imgs,$image);
+		$i++;
+	}
+	my $row = join("",@imgs);
+
+	print "Sample Name: " . $sample. "\n" if $verbose;
+
+	print HTML2 "<tr><td><font size=2><a href=\"$fqdir/fastqc_report.html\">FASTQC report</a></font></td><td nowrap>&nbsp;&nbsp;<font size=2>$sample</font>&nbsp;&nbsp;</td></td>$row</tr>\n";
+
+	print "\n" if $verbose;
+}
+print HTML2 "</table>";
+print HTML2 "<br>";
+print HTML2 "<font size=2><a href=\"http://wiki/research/FastQC/SIMRreports\">How to interpret FastQC results</a></font>";
+
